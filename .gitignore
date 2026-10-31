@@ -1,0 +1,17 @@
+# Environment variables -- holds your Kaggle API credentials
+.env
+
+# Virtual environment
+erep-env/
+
+# Python
+__pycache__/
+*.pyc
+
+# Data -- not committed; reproducible via src/data/download.py (see README)
+data/raw/
+data/processed/
+
+# OS
+.DS_Store
+Thumbs.db
