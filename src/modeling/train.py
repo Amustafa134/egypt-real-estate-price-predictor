@@ -7,6 +7,10 @@ Models:
     - random_forest:   bagged trees
     - hist_gradient_boosting: scikit-learn's gradient boosting
 
+Feature sets:
+    - city_level:    governorate + city
+    - with_compound: adds the compound / area name
+
 Each model is wrapped in a Pipeline with the shared preprocessor, so all
 imputation and encoding is learned from training folds only.
 
@@ -16,7 +20,6 @@ Run from the repo root:
 
 import time
 
-import numpy as np
 import pandas as pd
 from sklearn.dummy import DummyRegressor
 from sklearn.ensemble import HistGradientBoostingRegressor, RandomForestRegressor
@@ -38,6 +41,12 @@ REPORTS_DIR = REPO_ROOT / "reports"
 COMPARISON_PATH = REPORTS_DIR / "model_comparison.csv"
 CV_FOLDS = 5
 
+# feature set name -> include_compound
+FEATURE_SETS = {
+    "city_level": False,
+    "with_compound": True,
+}
+
 
 def get_models() -> dict:
     """Model name -> unfitted estimator."""
@@ -58,11 +67,11 @@ def get_models() -> dict:
     }
 
 
-def build_pipeline(model) -> Pipeline:
+def build_pipeline(model, include_compound: bool = False) -> Pipeline:
     """Shared preprocessing + the given model."""
     return Pipeline(
         steps=[
-            ("preprocess", build_preprocessor()),
+            ("preprocess", build_preprocessor(include_compound=include_compound)),
             ("model", model),
         ]
     )
@@ -82,31 +91,40 @@ def cross_validate_rmse(pipeline, X_train, y_train) -> tuple[float, float]:
     return float(rmse.mean()), float(rmse.std())
 
 
-def compare_models(X_train, X_test, y_train, y_test) -> pd.DataFrame:
-    """Cross-validate each model, fit on full train, score on test."""
+def compare_models(df: pd.DataFrame) -> pd.DataFrame:
+    """For each feature set and model: cross-validate, fit on train, score on test."""
     rows = []
-    for name, model in get_models().items():
-        print(f"  training {name} ...", flush=True)
-        start = time.perf_counter()
+    for feature_set, include_compound in FEATURE_SETS.items():
+        X, y = build_features(df, include_compound=include_compound)
+        X_train, X_test, y_train, y_test = split_data(X, y)
 
-        pipeline = build_pipeline(model)
-        cv_mean, cv_std = cross_validate_rmse(pipeline, X_train, y_train)
+        for name, model in get_models().items():
+            # The baseline ignores features, so run it only once.
+            if name == "median_baseline" and include_compound:
+                continue
 
-        pipeline.fit(X_train, y_train)
-        y_pred = pipeline.predict(X_test)
-        metrics = regression_metrics(y_test, y_pred)
+            print(f"  [{feature_set}] training {name} ...", flush=True)
+            start = time.perf_counter()
 
-        seconds = time.perf_counter() - start
-        rows.append(
-            {
-                "model": name,
-                "cv_rmse_log_mean": cv_mean,
-                "cv_rmse_log_std": cv_std,
-                **{f"test_{k}": v for k, v in metrics.items()},
-                "seconds": seconds,
-            }
-        )
-        print(f"    done in {seconds:.1f}s", flush=True)
+            pipeline = build_pipeline(model, include_compound=include_compound)
+            cv_mean, cv_std = cross_validate_rmse(pipeline, X_train, y_train)
+
+            pipeline.fit(X_train, y_train)
+            y_pred = pipeline.predict(X_test)
+            metrics = regression_metrics(y_test, y_pred)
+
+            seconds = time.perf_counter() - start
+            rows.append(
+                {
+                    "feature_set": feature_set,
+                    "model": name,
+                    "cv_rmse_log_mean": cv_mean,
+                    "cv_rmse_log_std": cv_std,
+                    **{f"test_{k}": v for k, v in metrics.items()},
+                    "seconds": seconds,
+                }
+            )
+            print(f"    done in {seconds:.1f}s", flush=True)
 
     return pd.DataFrame(rows)
 
@@ -115,6 +133,7 @@ def print_summary(results: pd.DataFrame) -> None:
     """Readable table: log-scale scores plus business-friendly EGP numbers."""
     view = pd.DataFrame(
         {
+            "features": results["feature_set"],
             "model": results["model"],
             "cv_rmse_log": results["cv_rmse_log_mean"].map("{:.3f}".format)
             + " +/- "
@@ -136,11 +155,10 @@ def print_summary(results: pd.DataFrame) -> None:
 
 def main() -> None:
     df = load_clean_data()
-    X, y = build_features(df)
-    X_train, X_test, y_train, y_test = split_data(X, y)
 
-    print(f"=== Training {len(get_models())} models ({CV_FOLDS}-fold CV + test) ===")
-    results = compare_models(X_train, X_test, y_train, y_test)
+    print(f"=== Training models on {len(FEATURE_SETS)} feature sets "
+          f"({CV_FOLDS}-fold CV + test) ===")
+    results = compare_models(df)
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     results.to_csv(COMPARISON_PATH, index=False)
